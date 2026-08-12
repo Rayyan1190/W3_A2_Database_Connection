@@ -99,10 +99,6 @@ tasks = [
     {"id": 3, "title": "I will Test with curl", "done": True}
 ]
 
-# Running counter tracks the next id to hand out. Starts after the seed
-# tasks above so a new task never collides with an existing id
-next_task_id = 4
-
 
 @app.get("/", summary="API info")
 def read_root():
@@ -153,15 +149,19 @@ def create_task(task: TaskCreate):
     if not task.title or not task.title.strip():
         raise HTTPException(status_code=400, detail="Title is required and cannot be empty")
 
-    global next_task_id
+    connection = get_connection()
 
-    # Counter is used instead of checking existing ids so a task id is never
-    # reused even after the task with that id has been deleted
-    new_task = {"id": next_task_id, "title": task.title, "done": False}
-    tasks.append(new_task)
-    next_task_id += 1
+    # Title is bound as a parameter instead of built into the SQL string, so it can never break out of the query.
+    cursor = connection.execute(
+        "INSERT INTO tasks (title, done) VALUES (?, ?)", (task.title, False)
+    )
+    connection.commit()
 
-    return new_task
+    # SQLite assigns the id itself, so we just read it back instead of tracking a counter.
+    new_task_id = cursor.lastrowid
+    connection.close()
+
+    return {"id": new_task_id, "title": task.title, "done": False}
 
 
 @app.put("/tasks/{task_id}", summary="Update a task's title and/or done status")
