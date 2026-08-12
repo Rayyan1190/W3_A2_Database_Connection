@@ -2,6 +2,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -17,6 +18,12 @@ def get_connection():
     connection = sqlite3.connect(DB_FILE)
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def row_to_task(row):
+    # done is stored as 0/1 since SQLite has no native boolean type. Cast
+    # back to bool here so the response shape matches Assignment 1 exactly
+    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
 
 
 def init_db():
@@ -117,27 +124,26 @@ def health_check():
 
 @app.get("/tasks", summary="List all tasks")
 def get_tasks():
-    # Returning the list directly since no filtering or pagination is needed yet
-    return tasks
+    # Straight read from tasks.db, no more in-memory list
+    connection = get_connection()
+    rows = connection.execute("SELECT * FROM tasks").fetchall()
+    connection.close()
+
+    return [row_to_task(row) for row in rows]
 
 
 @app.get("/tasks/{task_id}", summary="Get a single task by id")
 def get_task(task_id: int):
-    # Each task id is checked one by one since tasks are stored in a simple list
-    # with no index built for lookup by id
-    found_task = None
-    for task in tasks:
-        if task["id"] == task_id:
-            found_task = task
-            # Loop stops here once the match is found so the remaining tasks are not checked
-            break
+    # ? placeholder keeps the id out of the query string, avoids SQL injection
+    connection = get_connection()
+    row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    connection.close()
 
-    # 404 is raised explicitly here since a missing task is not the same as
-    # an empty result. Callers rely on the status code not just the body
-    if found_task is None:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    # Plain JSONResponse here, not HTTPException, so the key is "error" not "detail"
+    if row is None:
+        return JSONResponse(status_code=404, content={"error": "Task not found"})
 
-    return found_task
+    return row_to_task(row)
 
 
 @app.post("/tasks", status_code=201, summary="Create a new task")
