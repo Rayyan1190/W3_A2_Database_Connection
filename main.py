@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
 # /docs knows what this API is for before reading a single endpoint
 app = FastAPI(
     title="Task API",
-    description="A simple in memory CRUD API for managing tasks",
+    description="A simple SQLite-backed CRUD API for managing tasks",
     lifespan=lifespan
 )
 
@@ -88,16 +88,6 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     done: Optional[bool] = None
-
-
-# Endpoints below still read/write this list rather than tasks.db. The table
-# above exists and is seeded, but nothing is wired into the CRUD routes yet -
-# that swap happens in the next stage
-tasks = [
-    {"id": 1, "title": "I will Learn FastAPI basics", "done": False},
-    {"id": 2, "title": "I will Build the tasks endpoint", "done": False},
-    {"id": 3, "title": "I will Test with curl", "done": True}
-]
 
 
 @app.get("/", summary="API info")
@@ -166,48 +156,55 @@ def create_task(task: TaskCreate):
 
 @app.put("/tasks/{task_id}", summary="Update a task's title and/or done status")
 def update_task(task_id: int, task_update: TaskUpdate):
-    # Task is looked up first since a 404 should win over a 400. There is
-    # nothing to validate an update against if the task does not exist
-    found_task = None
-    for task in tasks:
-        if task["id"] == task_id:
-            found_task = task
-            break
+    connection = get_connection()
 
-    if found_task is None:
+    # Row is fetched first since a 404 should win over a 400, and the UPDATE below needs
+    # the current title/done for whichever field the client did not send.
+    row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+
+    if row is None:
+        connection.close()
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
     # Both fields missing means the client sent nothing worth applying
     if task_update.title is None and task_update.done is None:
+        connection.close()
         raise HTTPException(status_code=400, detail="Request body must include title or done")
 
     # A title that is present but blank is treated the same as a missing
     # title since an empty name is not a usable task title
-    if task_update.title is not None:
-        if not task_update.title.strip():
-            raise HTTPException(status_code=400, detail="Title cannot be empty")
-        found_task["title"] = task_update.title
+    if task_update.title is not None and not task_update.title.strip():
+        connection.close()
+        raise HTTPException(status_code=400, detail="Title cannot be empty")
 
-    if task_update.done is not None:
-        found_task["done"] = task_update.done
+    # A field left out of the request keeps its current value instead of being overwritten.
+    new_title = task_update.title if task_update.title is not None else row["title"]
+    new_done = task_update.done if task_update.done is not None else bool(row["done"])
 
-    return found_task
+    # Both columns are written every time, with values bound as parameters so the
+    # id and title can never be spliced into the SQL string.
+    connection.execute(
+        "UPDATE tasks SET title = ?, done = ? WHERE id = ?", (new_title, new_done, task_id)
+    )
+    connection.commit()
+    connection.close()
+
+    return {"id": task_id, "title": new_title, "done": new_done}
 
 
 @app.delete("/tasks/{task_id}", status_code=204, summary="Delete a task by id")
 def delete_task(task_id: int):
-    # Index is needed here rather than just the task since list.pop requires
-    # a position and there is no separate id to index map kept for this list
-    found_index = None
-    for index, task in enumerate(tasks):
-        if task["id"] == task_id:
-            found_index = index
-            break
+    connection = get_connection()
 
-    if found_index is None:
+    # id is bound as a parameter rather than formatted into the string, same reason as every other query here.
+    cursor = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    connection.commit()
+    connection.close()
+
+    # rowcount is 0 when no row matched that id, which tells us it never existed
+    # without needing a separate SELECT before the DELETE.
+    if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-    tasks.pop(found_index)
 
     # Response with no body is returned explicitly since 204 must not include
     # a payload. Returning None would still serialize to a json null body
