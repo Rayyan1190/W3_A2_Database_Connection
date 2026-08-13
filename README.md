@@ -104,6 +104,26 @@ At the point I ran these, my table had 3 tasks: id 1 (not done), id 3 (done), id
 
 After each write query I clicked "Write Changes" in DB Browser, then called `GET /tasks` from the API without restarting the server. The API's response matched DB Browser exactly every time - after the UPDATE it showed all 3 tasks as done, and after the DELETE it returned an empty list. This is the whole point of the checkpoint: the API and DB Browser are not two copies of the data that need to stay in sync, they are two windows onto the exact same rows in the exact same file.
 
+## Moving from SQLite to Postgres (Stage 0 - Postgres in Docker)
+
+Instead of installing Postgres directly on my machine, I'm running it as a Docker container. This means the exact same database engine, version and config works identically on any machine that has Docker installed, no manual Postgres install required.
+
+Command used to start it (also documented here so anyone cloning this repo knows how to bring the database up before running the app):
+
+```
+docker run --name taskdb -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=tasks -p 5432:5432 -v taskdata:/var/lib/postgresql/data -d postgres:16
+```
+
+Pinned to `postgres:16` instead of `postgres` (which resolves to `latest`). Version 18 changed the on-disk data layout to be `pg_ctlcluster`-compatible, and pulling `latest` here means the image version silently changes whenever Postgres cuts a new major release - not something I want happening on a random `docker run`. Pinning a version keeps the setup reproducible on every machine that clones this repo, same reasoning as pinning package versions in `requirements.txt`.
+
+- `--name taskdb` - names the container so it's easy to reference in later `docker` commands
+- `-e POSTGRES_PASSWORD=dev` / `-e POSTGRES_DB=tasks` - sets the superuser password and creates a `tasks` database on first boot
+- `-p 5432:5432` - maps the container's Postgres port out to `localhost:5432` so my app (running outside Docker for now) can connect to it
+- `-v taskdata:/var/lib/postgresql/data` - a named volume so the data survives the container being stopped or removed, same reason `tasks.db` survived a server restart in the SQLite version
+- `-d` - runs the container in the background
+
+`.env` will hold the real connection details (host, port, user, password, db name) once the app is wired up to Postgres. It's in `.gitignore` from this stage onward so no password is ever committed.
+
 ## A note on validation
 
 Throughout the project, I made sure the server never assumes the data coming from the client is correct. Every create and update request is checked properly, and proper status codes are returned in every situation, whether it is a success, a missing task, or bad input from the client. This is one of the most important habits in backend development, since the server is always the last line of defense before bad data gets stored.
