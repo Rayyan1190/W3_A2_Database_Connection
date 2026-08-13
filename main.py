@@ -94,15 +94,16 @@ def create_task(task: TaskCreate):
     connection = get_connection()
 
     # Title is bound as a parameter instead of built into the SQL string, so it can never break out of the query.
-    # RETURNING id hands back the id Postgres just assigned via the serial column - psycopg has no
-    # lastrowid like sqlite3 did, so this is how the new id is read in one round trip.
-    new_task_id = connection.execute(
-        "INSERT INTO tasks (title, done) VALUES (%s, %s) RETURNING id", (task.title, False)
-    ).fetchone()["id"]
+    # RETURNING * hands back the exact row Postgres just wrote (id included, assigned by the serial
+    # column) in the same round trip - psycopg has no lastrowid like sqlite3 did, so this is how the
+    # new row is read without a separate SELECT.
+    new_row = connection.execute(
+        "INSERT INTO tasks (title, done) VALUES (%s, %s) RETURNING *", (task.title, False)
+    ).fetchone()
     connection.commit()
     connection.close()
 
-    return {"id": new_task_id, "title": task.title, "done": False}
+    return row_to_task(new_row)
 
 
 @app.put("/tasks/{task_id}", summary="Update a task's title and/or done status")

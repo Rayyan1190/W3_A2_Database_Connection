@@ -141,6 +141,16 @@ A few lines in `main.py` had to change because they were SQLite-specific, not be
 
 Every endpoint's behavior, validation and status codes are exactly the same as the SQLite version - only the storage underneath changed.
 
+### Stage 2 - read from Postgres
+
+`GET /tasks` and `GET /tasks/{id}` already ran against Postgres as of Stage 1, since the driver swap in `db.py` touched every query at once rather than one route at a time. Verified this stage's checkpoint directly: `GET /tasks` returns `200` with the rows straight from Postgres, and `GET /tasks/{id}` with an id that doesn't exist returns `404` with `{"error": "Task not found"}` - unchanged from the SQLite version, only the engine underneath is different.
+
+### Stage 3 - full CRUD on Postgres
+
+`PUT /tasks/{id}` and `DELETE /tasks/{id}` also already used parameterized Postgres queries since Stage 1. The one real change this stage: `POST /tasks` used to insert with `RETURNING id` and rebuild the response dict by hand (`{"id": new_task_id, "title": task.title, "done": False}`). It now uses `RETURNING *` so the exact row Postgres just wrote comes back in the same round trip, and the response is built with `row_to_task()` like every other endpoint - one less place where the response shape could drift from what's actually stored.
+
+Checkpoint verified: created a task (`201`), marked it done with `PUT` (`200`), deleted it (`204`), then confirmed each step against `GET /tasks`. A `DELETE` on an id that no longer exists correctly returns `404`.
+
 ## A note on validation
 
 Throughout the project, I made sure the server never assumes the data coming from the client is correct. Every create and update request is checked properly, and proper status codes are returned in every situation, whether it is a success, a missing task, or bad input from the client. This is one of the most important habits in backend development, since the server is always the last line of defense before bad data gets stored.
