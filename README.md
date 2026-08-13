@@ -88,7 +88,7 @@ Every query anywhere in `main.py` uses `?` placeholders instead of building SQL 
 
 For Stage 4 I opened `tasks.db` in DB Browser for SQLite and ran some queries straight against the file, the same file my running API reads from. No syncing step exists between the two, since they are literally the same file on disk.
 
-![tasks.db open in DB Browser for SQLite](screenshots/db-browser.png)
+![tasks.db open in DB Browser for SQLite](screenshots/SS-1.png)
 
 At the point I ran these, my table had 3 tasks: id 1 (not done), id 3 (done), id 4 (done).
 
