@@ -1,6 +1,6 @@
 # Task API
 
-This is a simple backend project I built using FastAPI. The whole idea is to manage a list of tasks, so basically a small to do list system. It started out storing everything in a plain Python list that lived in memory while the server was running, which meant restarting the server wiped everything back to the three example tasks. I've since replaced that with a real SQLite database, so now the tasks actually survive a restart.
+This is a simple backend project I built using FastAPI. The whole idea is to manage a list of tasks, so basically a small to do list system. It started out storing everything in a plain Python list that lived in memory while the server was running, which meant restarting the server wiped everything back to the three example tasks. It then moved to a SQLite file on disk, and now runs on a real PostgreSQL database server, containerized with Docker and started with a single `docker compose up` - the same kind of setup real backend teams run in production.
 
 ## What this project does
 
@@ -12,20 +12,33 @@ Python
 FastAPI
 Pydantic for validating the request body
 Uvicorn to actually run the server
-PostgreSQL (via `psycopg`) for storage, running in a Docker container
-`python-dotenv` to load the database connection string from `.env`
-
-## Why SQLite
-
-I picked SQLite over something like Postgres or MySQL because it fits a small project like this without adding any extra moving parts:
-
-- **Single file** - the entire database is just `tasks.db`, one file sitting next to `main.py`. No separate database server to install, configure, or keep running in the background.
-- **Zero setup** - Python already ships with the `sqlite3` module, so there is no extra service to install and no connection string, host, port, username or password to configure. `pip install -r requirements.txt` is enough.
-- **Survives restarts** - because it is a real file on disk instead of a Python list in memory, the data is still there the next time the process starts, which was the entire point of this assignment.
+PostgreSQL (via `psycopg`) for storage
+Docker & Docker Compose to run Postgres and the app itself, as containers
+`python-dotenv` to load the database connection string from `.env` (only needed when running outside Docker Compose)
 
 ## Where the database lives
 
-The database is `tasks.db`, in the root of the project next to `main.py`. It is created automatically the first time the app starts, so it does not need to exist in the repo at all. It is listed in `.gitignore` on purpose, so it is never committed - anyone who clones this repo starts with no `tasks.db` file, and my code creates it and seeds it with three example tasks the moment the server starts, which means a clean clone behaves exactly the same as my own machine.
+The database is a PostgreSQL server running in its own Docker container (the `db` service in `compose.yaml`), not a file inside this project. Its data lives in a named Docker volume (`taskdata`), which is created and managed by Docker itself - it survives the container, and the app, being stopped, removed, or restarted. It is never part of the git repo, the same way a real production database would never live inside a code repository.
+
+Earlier in this project the database really was a single file, `tasks.db`, sitting next to `main.py` (see "Why SQLite" below for that history) - that file is no longer used and is git-ignored.
+
+## Environment variables
+
+The app needs exactly one environment variable: `DATABASE_URL`, a full Postgres connection string in the form `postgres://user:password@host:port/dbname`.
+
+- `.env.example` (committed to the repo) documents this key with placeholder values - copy it to get started: `cp .env.example .env`
+- `.env` itself (git-ignored, never committed) holds the real value. It's only needed if you run the app directly with `uvicorn` instead of through `docker compose up` - see "Running without Docker" below
+- When running via `docker compose up`, `DATABASE_URL` is set directly in `compose.yaml`'s `environment:` block (pointing at the `db` service by its container name, `db`, not `localhost`), so no `.env` file is required for that path at all
+
+## Why SQLite (project history)
+
+Before Postgres, this project used SQLite. I picked SQLite at the time because it fit a small project without adding any extra moving parts:
+
+- **Single file** - the entire database was just `tasks.db`, one file sitting next to `main.py`. No separate database server to install, configure, or keep running in the background.
+- **Zero setup** - Python already ships with the `sqlite3` module, so there was no extra service to install and no connection string, host, port, username or password to configure.
+- **Survives restarts** - because it was a real file on disk instead of a Python list in memory, the data was still there the next time the process started.
+
+This section is kept for history - see "Moving from SQLite to Postgres" further down for why and how that changed.
 
 ## Quick start (one command)
 
@@ -51,6 +64,16 @@ Once it is running, you can open the browser and go to http://localhost:8000/doc
 
 ## All the API endpoints
 
+| Method | Path | Description | Success | Error |
+|---|---|---|---|---|
+| GET | `/` | API info - name, version, endpoints | 200 | - |
+| GET | `/health` | Proves the server process is up | 200 | - |
+| GET | `/tasks` | List every task | 200 | - |
+| GET | `/tasks/{id}` | Get one task by id | 200 | 404 if id doesn't exist |
+| POST | `/tasks` | Create a task (`title` required) | 201 | 400 if title missing/empty |
+| PUT | `/tasks/{id}` | Update a task's title and/or done | 200 | 404 if id doesn't exist, 400 if body has nothing to update or title is blank |
+| DELETE | `/tasks/{id}` | Delete a task | 204 | 404 if id doesn't exist |
+
 ### GET /
 This is like the front door of the API. It just returns some basic info about the API such as its name, version and the endpoints it has.
 
@@ -61,24 +84,44 @@ This one is used to check if the server is alive. It does not check the database
 Runs `SELECT * FROM tasks` and returns every row from the database.
 
 ### GET /tasks/{task_id}
-Runs `SELECT * FROM tasks WHERE id = ?` to fetch one task. If no task exists with that id, the server responds with a 404 status code and a proper error message instead of just returning an empty response.
+Runs `SELECT * FROM tasks WHERE id = %s` to fetch one task. If no task exists with that id, the server responds with a 404 status code and a proper error message instead of just returning an empty response.
 
 ### POST /tasks
-This is used to create a new task. The client has to send a title in the request body. The server checks that the title is not empty or missing, since the server should never blindly trust what the client sends. If the title is missing, it responds with a 400 status code. If everything is fine, it runs `INSERT INTO tasks (title, done) VALUES (?, ?)` and lets SQLite assign the id itself, instead of tracking a counter by hand. The done value is set to false by default, and the new task is returned back with a 201 status code, which means something was successfully created.
+This is used to create a new task. The client has to send a title in the request body. The server checks that the title is not empty or missing, since the server should never blindly trust what the client sends. If the title is missing, it responds with a 400 status code. If everything is fine, it runs `INSERT INTO tasks (title, done) VALUES (%s, %s) RETURNING *` and lets Postgres assign the id itself via a `SERIAL` column, instead of tracking a counter by hand. The done value is set to false by default, and the new task is returned back with a 201 status code, which means something was successfully created.
 
 ### PUT /tasks/{task_id}
-This is used to update an existing task. A client can update the title, the done value, or both together. The task is looked up first since a 404 should win over a 400. If the task id does not exist, it returns 404. If the body sent by the client is empty or does not contain title or done at all, it returns 400, since there is nothing meaningful to update in that case. Once validated, it runs `UPDATE tasks SET title = ?, done = ? WHERE id = ?`, reusing whichever value the client did not send so that field is not overwritten with nothing.
+This is used to update an existing task. A client can update the title, the done value, or both together. The task is looked up first since a 404 should win over a 400. If the task id does not exist, it returns 404. If the body sent by the client is empty or does not contain title or done at all, it returns 400, since there is nothing meaningful to update in that case. Once validated, it runs `UPDATE tasks SET title = %s, done = %s WHERE id = %s`, reusing whichever value the client did not send so that field is not overwritten with nothing.
 
 ### DELETE /tasks/{task_id}
-This removes a task completely using `DELETE FROM tasks WHERE id = ?`. If a row was actually deleted, it returns a 204 status code with an empty body, since there is nothing more to say after a successful delete. If the task id does not exist, it returns 404.
+This removes a task completely using `DELETE FROM tasks WHERE id = %s`. If a row was actually deleted, it returns a 204 status code with an empty body, since there is nothing more to say after a successful delete. If the task id does not exist, it returns 404.
+
+### Example request
+
+```
+$ curl -i http://localhost:8000/tasks
+```
+```
+HTTP/1.1 200 OK
+date: Thu, 13 Aug 2026 17:17:18 GMT
+server: uvicorn
+content-length: 272
+content-type: application/json
+
+[{"id":1,"title":"I will Learn FastAPI basics","done":false},{"id":2,"title":"I will Build the tasks endpoint","done":false},{"id":3,"title":"I will Test with curl","done":true},{"id":4,"title":"Compose test 1","done":false},{"id":5,"title":"Compose test 2","done":false}]
+```
 
 ## Project structure
 
 ```
 CRUD-APi/
-    main.py            all the API code and logic lives here
-    tasks.db            the SQLite database file, created automatically on first run - git-ignored, not in the repo
-    .gitignore          keeps tasks.db, __pycache__ and .venv out of the repo
+    main.py            all the API route logic lives here - has no idea it's talking to Postgres
+    db.py              all Postgres connection/table/seed logic - the only file that touches the database directly
+    Dockerfile          builds the app into a container image
+    compose.yaml        starts the app + Postgres together with `docker compose up`
+    .dockerignore        keeps .venv, .env, tasks.db etc out of the image build context
+    .env.example         documents the DATABASE_URL key with placeholder values - committed
+    .env                 real DATABASE_URL for local (non-Docker) runs - git-ignored, never committed
+    .gitignore           keeps .env, tasks.db, __pycache__ and .venv out of the repo
     requirements.txt    python packages needed to run the project
     README.md            this file
 ```
@@ -177,6 +220,37 @@ A few choices differ from the assignment's example snippet, on purpose:
 The hand-run `taskdb` container from Stage 0 is stopped once `docker compose up` takes over, since compose now manages its own `db` container and volume (`taskdata`, defined fresh in `compose.yaml` - separate from the old manually-created `taskdata` volume).
 
 Checkpoint verified: `docker compose up` brought up both containers from a clean state, created a few tasks through the API, ran `docker compose down` then `docker compose up` again, and the tasks were still there - because the named volume persisted independently of the containers themselves.
+
+### Stage 5 - one-command stack + docs, then publish
+
+Final stage: making sure a stranger can clone this repo and get a working API in one command, with nothing hidden or assumed.
+
+- Confirmed `.env` is git-ignored (`git check-ignore -v .env` confirms it) and only `.env.example` (placeholder values) is committed - no real password is anywhere in git history
+- Rewrote this README so the current state (Postgres + Docker) is accurate everywhere, not just in the stage-by-stage history below - the "Why SQLite" section is now explicitly marked as project history rather than describing the live setup
+- Added an environment variables section pointing at `.env.example`, and a table of every endpoint with its success/error status codes
+
+**The round-trip, as a stranger would run it:**
+
+```
+git clone https://github.com/Rayyan1190/W3_A2_Database_Connection.git
+cd W3_A2_Database_Connection
+cp .env.example .env
+docker compose up
+```
+
+Then, in another terminal:
+
+```
+curl -i http://localhost:8000/tasks
+```
+
+No Postgres install, no `pip install`, no manual table creation - `docker compose up` builds the app image, starts Postgres, waits for it to be healthy, creates the `tasks` table, seeds three example tasks, and starts the API, all from that one command.
+
+### Postgres data, viewed directly
+
+Screenshot of the seeded data queried straight from the Postgres container (`docker exec -it taskdb psql -U postgres -d tasks` running `\dt` and `SELECT * FROM tasks;`):
+
+![Postgres tasks table via psql](screenshots/SS-06.png)
 
 ## A note on validation
 
