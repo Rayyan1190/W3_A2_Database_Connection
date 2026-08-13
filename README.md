@@ -12,7 +12,8 @@ Python
 FastAPI
 Pydantic for validating the request body
 Uvicorn to actually run the server
-SQLite (via Python's built in sqlite3 module) for storage
+PostgreSQL (via `psycopg`) for storage, running in a Docker container
+`python-dotenv` to load the database connection string from `.env`
 
 ## Why SQLite
 
@@ -111,18 +112,34 @@ Instead of installing Postgres directly on my machine, I'm running it as a Docke
 Command used to start it (also documented here so anyone cloning this repo knows how to bring the database up before running the app):
 
 ```
-docker run --name taskdb -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=tasks -p 5432:5432 -v taskdata:/var/lib/postgresql/data -d postgres:16
+docker run --name taskdb -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=tasks -p 5433:5432 -v taskdata:/var/lib/postgresql/data -d postgres:16
 ```
 
 Pinned to `postgres:16` instead of `postgres` (which resolves to `latest`). Version 18 changed the on-disk data layout to be `pg_ctlcluster`-compatible, and pulling `latest` here means the image version silently changes whenever Postgres cuts a new major release - not something I want happening on a random `docker run`. Pinning a version keeps the setup reproducible on every machine that clones this repo, same reasoning as pinning package versions in `requirements.txt`.
 
 - `--name taskdb` - names the container so it's easy to reference in later `docker` commands
 - `-e POSTGRES_PASSWORD=dev` / `-e POSTGRES_DB=tasks` - sets the superuser password and creates a `tasks` database on first boot
-- `-p 5432:5432` - maps the container's Postgres port out to `localhost:5432` so my app (running outside Docker for now) can connect to it
+- `-p 5433:5432` - maps the container's Postgres port to `localhost:5433` on the host, not `5432`. My machine already has a native PostgreSQL 18 Windows service listening on `5432`, and it was silently intercepting connections meant for this container (same `localhost:5432` address, wrong server underneath - the client got a password rejection from the wrong Postgres instance entirely). Using `5433` on the host side avoids that clash without needing to touch the native service, while the container still uses the standard `5432` internally
 - `-v taskdata:/var/lib/postgresql/data` - a named volume so the data survives the container being stopped or removed, same reason `tasks.db` survived a server restart in the SQLite version
 - `-d` - runs the container in the background
 
 `.env` will hold the real connection details (host, port, user, password, db name) once the app is wired up to Postgres. It's in `.gitignore` from this stage onward so no password is ever committed.
+
+### Stage 1 - connect via .env and create table
+
+The app now connects to the Postgres container instead of `tasks.db`:
+
+- `.env` (git-ignored, never committed) holds the real connection string: `DATABASE_URL=postgres://postgres:dev@localhost:5432/tasks`
+- `.env.example` (committed) documents the same key with a placeholder value, so anyone cloning the repo knows what to put in their own `.env` without seeing my real one
+- Installed `psycopg[binary]` as the Postgres driver and `python-dotenv` to load `.env` into the environment at startup
+- All connection, table-creation and seeding logic was pulled out of `main.py` into a new `db.py` module. `main.py` now only imports `get_connection`, `row_to_task` and `init_db` from it - it has no idea whether the database underneath is Postgres, SQLite, or anything else
+- On startup, `db.py` reads `DATABASE_URL`, connects with `psycopg`, creates the `tasks` table if it doesn't exist (`id SERIAL PRIMARY KEY, title TEXT, done BOOLEAN`), and seeds the same three example tasks only if the table is empty - identical first-run rule to the SQLite version
+
+A few lines in `main.py` had to change because they were SQLite-specific, not because any route logic changed:
+- `?` placeholders became `%s`, since that's psycopg's parameter style
+- SQLite's `cursor.lastrowid` doesn't exist in psycopg, so `POST /tasks` now uses `INSERT ... RETURNING id` to get the new row's id back in the same query
+
+Every endpoint's behavior, validation and status codes are exactly the same as the SQLite version - only the storage underneath changed.
 
 ## A note on validation
 

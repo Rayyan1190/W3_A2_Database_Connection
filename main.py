@@ -1,4 +1,3 @@
-import sqlite3
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Response
@@ -6,57 +5,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
-# File lives next to main.py and is created automatically on first run, so
-# no manual setup step is needed before the app can start
-DB_FILE = "tasks.db"
-
-
-def get_connection():
-    # row_factory lets a row be read like a dict (row["title"]) instead of
-    # by positional index, which keeps future query code close to the shape
-    # the API already returns to clients
-    connection = sqlite3.connect(DB_FILE)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
-def row_to_task(row):
-    # done is stored as 0/1 since SQLite has no native boolean type. Cast
-    # back to bool here so the response shape matches Assignment 1 exactly
-    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
-
-
-def init_db():
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    # IF NOT EXISTS makes this safe to call on every startup, a restart
-    # should never fail just because the table was already created before
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            done BOOLEAN NOT NULL DEFAULT 0
-        )
-    """)
-
-    cursor.execute("SELECT COUNT(*) FROM tasks")
-    existing_task_count = cursor.fetchone()[0]
-
-    # Seeding only happens when the table is empty so the same three example
-    # tasks are not re-inserted every time the app restarts
-    if existing_task_count == 0:
-        cursor.executemany(
-            "INSERT INTO tasks (title, done) VALUES (?, ?)",
-            [
-                ("I will Learn FastAPI basics", False),
-                ("I will Build the tasks endpoint", False),
-                ("I will Test with curl", True),
-            ]
-        )
-
-    connection.commit()
-    connection.close()
+# All connection/table/seed logic lives in db.py now - this file only ever
+# imports from it, it never talks to Postgres directly
+from db import get_connection, row_to_task, init_db
 
 
 @asynccontextmanager
@@ -71,7 +22,7 @@ async def lifespan(app: FastAPI):
 # /docs knows what this API is for before reading a single endpoint
 app = FastAPI(
     title="Task API",
-    description="A simple SQLite-backed CRUD API for managing tasks",
+    description="A simple Postgres-backed CRUD API for managing tasks",
     lifespan=lifespan
 )
 
@@ -110,7 +61,7 @@ def health_check():
 
 @app.get("/tasks", summary="List all tasks")
 def get_tasks():
-    # Straight read from tasks.db, no more in-memory list
+    # Straight read from Postgres, no more in-memory list
     connection = get_connection()
     rows = connection.execute("SELECT * FROM tasks").fetchall()
     connection.close()
@@ -120,9 +71,10 @@ def get_tasks():
 
 @app.get("/tasks/{task_id}", summary="Get a single task by id")
 def get_task(task_id: int):
-    # ? placeholder keeps the id out of the query string, avoids SQL injection
+    # %s placeholder keeps the id out of the query string, avoids SQL injection
+    # (psycopg's paramstyle, replaces SQLite's ? from the previous version)
     connection = get_connection()
-    row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    row = connection.execute("SELECT * FROM tasks WHERE id = %s", (task_id,)).fetchone()
     connection.close()
 
     # Plain JSONResponse here, not HTTPException, so the key is "error" not "detail"
@@ -142,13 +94,12 @@ def create_task(task: TaskCreate):
     connection = get_connection()
 
     # Title is bound as a parameter instead of built into the SQL string, so it can never break out of the query.
-    cursor = connection.execute(
-        "INSERT INTO tasks (title, done) VALUES (?, ?)", (task.title, False)
-    )
+    # RETURNING id hands back the id Postgres just assigned via the serial column - psycopg has no
+    # lastrowid like sqlite3 did, so this is how the new id is read in one round trip.
+    new_task_id = connection.execute(
+        "INSERT INTO tasks (title, done) VALUES (%s, %s) RETURNING id", (task.title, False)
+    ).fetchone()["id"]
     connection.commit()
-
-    # SQLite assigns the id itself, so we just read it back instead of tracking a counter.
-    new_task_id = cursor.lastrowid
     connection.close()
 
     return {"id": new_task_id, "title": task.title, "done": False}
@@ -160,7 +111,7 @@ def update_task(task_id: int, task_update: TaskUpdate):
 
     # Row is fetched first since a 404 should win over a 400, and the UPDATE below needs
     # the current title/done for whichever field the client did not send.
-    row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    row = connection.execute("SELECT * FROM tasks WHERE id = %s", (task_id,)).fetchone()
 
     if row is None:
         connection.close()
@@ -179,12 +130,12 @@ def update_task(task_id: int, task_update: TaskUpdate):
 
     # A field left out of the request keeps its current value instead of being overwritten.
     new_title = task_update.title if task_update.title is not None else row["title"]
-    new_done = task_update.done if task_update.done is not None else bool(row["done"])
+    new_done = task_update.done if task_update.done is not None else row["done"]
 
     # Both columns are written every time, with values bound as parameters so the
     # id and title can never be spliced into the SQL string.
     connection.execute(
-        "UPDATE tasks SET title = ?, done = ? WHERE id = ?", (new_title, new_done, task_id)
+        "UPDATE tasks SET title = %s, done = %s WHERE id = %s", (new_title, new_done, task_id)
     )
     connection.commit()
     connection.close()
@@ -197,7 +148,7 @@ def delete_task(task_id: int):
     connection = get_connection()
 
     # id is bound as a parameter rather than formatted into the string, same reason as every other query here.
-    cursor = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    cursor = connection.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
     connection.commit()
     connection.close()
 
