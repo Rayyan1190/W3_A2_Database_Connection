@@ -1,0 +1,33 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Inside the compose network the app reaches Postgres by service name
+      # "db", not "localhost" - compose gives every service its own DNS name
+      DATABASE_URL: postgres://postgres:dev@db:5432/tasks
+    depends_on:
+      db:
+        # Waits for the healthcheck below to pass, not just for the container
+        # to start, so the app never tries to connect before Postgres is
+        # actually ready to accept connections
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: tasks
+    volumes:
+      # Named volume, not a bind mount - data survives "docker compose down"
+      # and is only gone if the volume itself is explicitly removed
+      - taskdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  taskdata:
